@@ -783,6 +783,12 @@
             opacity: 1;
         }
 
+        body.controls-hidden .navVideo {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
         .navVideo:disabled {
             opacity: .22;
             cursor: default;
@@ -819,7 +825,69 @@
             :root {
                 --video-gallery-width: 142px;
                 --video-gallery-hot-zone: 14px;
-                --video-controls-reserved-space: 96px;
+                --video-controls-reserved-space: 132px;
+            }
+
+            #ui {
+                padding: 7px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+            }
+
+            .control-row {
+                flex-wrap: wrap;
+                justify-content: center;
+                row-gap: 2px;
+                column-gap: 3px;
+            }
+
+            /* Force a predictable second row after the playback/time group. */
+            .control-row .spacer {
+                display: block;
+                flex: 0 0 100%;
+                height: 0;
+            }
+
+            .jf-btn {
+                min-width: 36px;
+                min-height: 36px;
+                padding: 6px;
+            }
+
+            .jf-btn .material-icons,
+            .jf-btn.small .material-icons {
+                font-size: 21px;
+            }
+
+            .time {
+                padding: 0 4px;
+                font-size: 12px;
+            }
+
+            /* Pinch handles zoom on touch screens; these three buttons consume
+               nearly a third of the available phone width. */
+            #zoomOutBtn,
+            #zoomResetBtn,
+            #zoomInBtn,
+            #endsAt,
+            .vr-badge {
+                display: none;
+            }
+
+            .autoplay-btn {
+                min-width: 50px;
+                width: 50px;
+                height: 32px;
+                min-height: 32px;
+            }
+
+            .autoplay-btn.toggle-active .autoplay-knob {
+                left: 21px;
+            }
+
+            .settings-panel,
+            .settings-sub {
+                bottom: calc(var(--video-controls-reserved-space) + 8px);
+                right: 8px;
+                max-width: calc(100vw - 16px);
             }
 
             .videoGalleryName {
@@ -852,6 +920,116 @@
             .projection-menu {
                 min-width: 158px;
                 bottom: calc(100% + 8px);
+            }
+        }
+
+        @media (max-width: 380px) {
+            .control-row {
+                column-gap: 1px;
+            }
+
+            .jf-btn {
+                min-width: 34px;
+                min-height: 34px;
+                padding: 5px;
+            }
+
+            .time {
+                padding: 0 2px;
+                font-size: 11px;
+            }
+
+            .autoplay-btn {
+                min-width: 46px;
+                width: 46px;
+            }
+
+            .autoplay-btn.toggle-active .autoplay-knob {
+                left: 17px;
+            }
+        }
+
+        /* Android phones commonly exceed 700px wide in landscape, so width-only
+           mobile rules do not apply. Use the short, coarse-pointer viewport as
+           the signal and keep the controls in one compact centered row. */
+        @media (pointer: coarse) and (orientation: landscape) and (max-height: 600px) {
+            :root {
+                --video-controls-reserved-space: 68px;
+            }
+
+            #ui {
+                padding: 5px max(10px, env(safe-area-inset-right, 0px))
+                    calc(6px + env(safe-area-inset-bottom, 0px))
+                    max(10px, env(safe-area-inset-left, 0px));
+            }
+
+            .progress-container {
+                margin-bottom: 4px;
+            }
+
+            .control-row {
+                flex-wrap: nowrap;
+                justify-content: center;
+                gap: 2px;
+            }
+
+            .control-row .spacer {
+                display: none;
+            }
+
+            .jf-btn {
+                min-width: 34px;
+                min-height: 34px;
+                padding: 5px;
+            }
+
+            .jf-btn .material-icons,
+            .jf-btn.small .material-icons {
+                font-size: 20px;
+            }
+
+            #zoomOutBtn,
+            #zoomResetBtn,
+            #zoomInBtn,
+            #endsAt,
+            .vr-badge {
+                display: none;
+            }
+
+            .time {
+                padding: 0 3px;
+                font-size: 11px;
+            }
+
+            .projection-btn {
+                min-width: 34px;
+                width: 34px;
+                height: 34px;
+                padding: 0;
+                border-radius: 50%;
+            }
+
+            #projectionLabel,
+            #projectionCaret {
+                display: none;
+            }
+
+            .autoplay-btn {
+                min-width: 46px;
+                width: 46px;
+                height: 30px;
+                min-height: 30px;
+            }
+
+            .autoplay-btn.toggle-active .autoplay-knob {
+                left: 17px;
+            }
+
+            .settings-panel,
+            .settings-sub {
+                bottom: calc(var(--video-controls-reserved-space) + 6px);
+                max-height: calc(100vh - var(--video-controls-reserved-space) - 18px);
+                overflow-y: auto;
             }
         }
     <\/style>
@@ -1584,7 +1762,12 @@
         let pLastVideoTime = -1;
         let pFrameCanvas = null;
         let pFrameContext = null;
+        let normalFrameCanvas = null;
+        let normalFrameContext = null;
+        let normalTextureSource = null;
+        let normalLastVideoTime = -1;
         let projectionToastTimer = null;
+        const projectionCameraDirection = new THREE.Vector3();
 
         function currentProjectionMode() {
             return PROJECTION_MODES[projectionModeIndex] || PROJECTION_MODES[0];
@@ -1628,6 +1811,7 @@
             projectionMenuOpen = true;
             projectionBtn.setAttribute('aria-expanded', 'true');
             ui.classList.remove('hidden');
+            document.body.classList.remove('controls-hidden');
             clearTimeout(hideTimer);
         }
 
@@ -1899,11 +2083,134 @@
             }
         }
 
+        function restoreNormalProjectionSurface() {
+            // Updating only A-Frame's attribute is not enough on some Android
+            // Chromium/WebView builds after the overlay WebGL canvas has been
+            // displayed. Keep the Three.js object and video texture in sync too.
+            videosphere.setAttribute('visible', true);
+
+            const sphereObject = videosphere.object3D;
+            if (sphereObject) sphereObject.visible = true;
+
+            try {
+                const mesh = videosphere.getObject3D?.('mesh');
+                const materials = Array.isArray(mesh?.material)
+                    ? mesh.material
+                    : [mesh?.material];
+
+                materials.forEach((material) => {
+                    if (!material) return;
+                    material.visible = true;
+                    if (material.map) {
+                        // Reaffirm the media element because Android may leave
+                        // VideoTexture pointing at a stale decoded frame.
+                        if (normalTextureSource) {
+                            material.map.image = normalTextureSource;
+                        } else if (videoElement) {
+                            material.map.image = videoElement;
+                        }
+                        material.map.needsUpdate = true;
+                    }
+                    material.needsUpdate = true;
+                });
+
+                // A-Frame and the projection canvas use separate WebGL contexts.
+                // Reset cached renderer state before the scene draws again.
+                videosphere.sceneEl?.renderer?.resetState?.();
+            } catch (error) {
+                console.debug('[Jellyfin VR] Normal projection restore note:', error);
+            }
+        }
+
+        function configureNormalProjectionTexture() {
+            normalTextureSource = videoElement;
+            normalLastVideoTime = -1;
+
+            if (
+                !videoElement?.videoWidth ||
+                !videoElement?.videoHeight
+            ) return;
+
+            try {
+                const gl = videosphere.sceneEl?.renderer?.getContext?.();
+                const gpuLimit = gl?.getParameter(gl.MAX_TEXTURE_SIZE) || 4096;
+                const coarsePointer = window.matchMedia('(pointer: coarse)').matches;
+                const safeLimit = Math.min(gpuLimit, coarsePointer ? 2048 : gpuLimit);
+
+                if (
+                    videoElement.videoWidth <= safeLimit &&
+                    videoElement.videoHeight <= safeLimit
+                ) return;
+
+                const scale = Math.min(
+                    safeLimit / videoElement.videoWidth,
+                    safeLimit / videoElement.videoHeight
+                );
+                const width = Math.max(2, Math.floor(videoElement.videoWidth * scale));
+                const height = Math.max(2, Math.floor(videoElement.videoHeight * scale));
+
+                if (!normalFrameCanvas) {
+                    normalFrameCanvas = document.createElement('canvas');
+                    normalFrameContext = normalFrameCanvas.getContext('2d', {
+                        alpha: false,
+                        desynchronized: true
+                    });
+                }
+
+                if (!normalFrameContext) return;
+                normalFrameCanvas.width = width;
+                normalFrameCanvas.height = height;
+                normalTextureSource = normalFrameCanvas;
+            } catch (error) {
+                console.debug('[Jellyfin VR] Normal texture sizing note:', error);
+            }
+        }
+
+        function updateNormalProjectionFrame() {
+            if (
+                currentProjectionMode().key !== 'normal' ||
+                normalTextureSource !== normalFrameCanvas ||
+                !normalFrameContext ||
+                !videoElement ||
+                videoElement.readyState < 2
+            ) return;
+
+            if (
+                normalLastVideoTime === videoElement.currentTime &&
+                !videoElement.seeking
+            ) return;
+
+            try {
+                normalFrameContext.drawImage(
+                    videoElement,
+                    0,
+                    0,
+                    normalFrameCanvas.width,
+                    normalFrameCanvas.height
+                );
+                normalLastVideoTime = videoElement.currentTime;
+
+                const mesh = videosphere.getObject3D?.('mesh');
+                const materials = Array.isArray(mesh?.material)
+                    ? mesh.material
+                    : [mesh?.material];
+                materials.forEach((material) => {
+                    if (material?.map) material.map.needsUpdate = true;
+                });
+            } catch (error) {
+                console.debug('[Jellyfin VR] Normal frame update note:', error);
+            }
+        }
+
         function useNormalProjection(message) {
             projectionModeIndex = 0;
             updateProjectionButton();
             projectionCanvas.style.display = 'none';
-            videosphere.setAttribute('visible', true);
+            restoreNormalProjectionSurface();
+
+            // On Android the mesh/texture can be attached a frame after the mode
+            // selection. Refresh once more after A-Frame has resumed rendering.
+            requestAnimationFrame(restoreNormalProjectionSurface);
             if (message) showProjectionToast(message, 2200);
         }
 
@@ -1912,9 +2219,9 @@
             updateProjectionButton();
 
             if (mode.key === 'normal') {
-                projectionCanvas.style.display = 'none';
-                videosphere.setAttribute('visible', true);
-                if (announce) showProjectionToast('Projection: Normal');
+                useNormalProjection(
+                    announce ? 'Projection: Normal' : undefined
+                );
                 return;
             }
 
@@ -1960,6 +2267,8 @@
         }
 
         function drawProjectionFrame() {
+            updateNormalProjectionFrame();
+
             if (
                 projectionCanvas.style.display === 'none' ||
                 !pReady ||
@@ -2021,18 +2330,27 @@
                     Math.max(1, projectionCanvas.height)
                 );
 
-                const controls =
-                    cameraEl.components &&
-                    cameraEl.components['look-controls'];
+                // Use the camera's final world direction instead of reading only
+                // look-controls' manual yaw/pitch objects. The world direction
+                // includes drag direction, device motion and A-Frame transforms,
+                // keeping Mirror Ball and Little Planet aligned with Normal mode.
+                cameraEl.object3D.updateWorldMatrix?.(true, false);
+                cameraEl.object3D.getWorldDirection(projectionCameraDirection);
 
-                const yaw =
-                    controls && controls.yawObject
-                        ? controls.yawObject.rotation.y
-                        : 0;
-                const pitch =
-                    controls && controls.pitchObject
-                        ? controls.pitchObject.rotation.x
-                        : 0;
+                const directionLength = projectionCameraDirection.lengthSq();
+                let yaw = 0;
+                let pitch = 0;
+
+                if (directionLength > 0.000001) {
+                    projectionCameraDirection.normalize();
+                    yaw = Math.atan2(
+                        -projectionCameraDirection.x,
+                        -projectionCameraDirection.z
+                    );
+                    pitch = Math.asin(
+                        Math.max(-1, Math.min(1, projectionCameraDirection.y))
+                    );
+                }
 
                 pgl.uniform1f(pLocations.yaw, yaw || 0);
                 pgl.uniform1f(pLocations.pitch, pitch || 0);
@@ -2296,8 +2614,12 @@
         // Show controls and auto-hide after 4 seconds
         function showControls() {
             ui.classList.remove('hidden');
+            document.body.classList.remove('controls-hidden');
             clearTimeout(hideTimer);
-            hideTimer = setTimeout(() => ui.classList.add('hidden'), 4000);
+            hideTimer = setTimeout(() => {
+                ui.classList.add('hidden');
+                document.body.classList.add('controls-hidden');
+            }, 4000);
         }
 
         // Initialize zoom and wire the on-screen controls.
@@ -2893,6 +3215,8 @@
                 videoElement.autoplay    = true;
                 videoElement.loop        = false;
                 videoElement.playsInline = true;
+                videoElement.setAttribute('playsinline', '');
+                videoElement.setAttribute('webkit-playsinline', '');
                 videoElement.preload     = 'auto';
 
                 document.getElementById('assets').appendChild(videoElement);
@@ -2928,6 +3252,8 @@
                     try { videoElement.currentTime = currentTime; } catch (_) {}
                 }
 
+                configureNormalProjectionTexture();
+
                 // Explicitly reaffirm the texture source after src changes.
                 // This is mostly defensive; reusing the same video element is the
                 // key fix, but these flags force Three/A-Frame to refresh immediately.
@@ -2936,7 +3262,7 @@
                     const material = mesh?.material;
                     const texture = material?.map;
                     if (texture) {
-                        texture.image = videoElement;
+                        texture.image = normalTextureSource || videoElement;
                         texture.needsUpdate = true;
                     }
                     if (material) material.needsUpdate = true;
@@ -2965,7 +3291,8 @@
                     const mesh = videosphere.getObject3D?.('mesh');
                     const texture = mesh?.material?.map;
                     if (texture) {
-                        texture.image = videoElement;
+                        configureNormalProjectionTexture();
+                        texture.image = normalTextureSource || videoElement;
                         texture.needsUpdate = true;
                     }
                 } catch (_) {}
