@@ -562,13 +562,16 @@
             --video-gallery-width: 224px;
             --video-gallery-toggle-width: 28px;
             --video-gallery-hot-zone: 18px;
+
+            /* Kept in sync with the real playback-control height by JavaScript. */
+            --video-controls-reserved-space: 80px;
         }
 
         #videoGalleryPanel {
             position: fixed;
             left: 0;
             top: 64px;
-            bottom: 0;
+            bottom: var(--video-controls-reserved-space);
             width: var(--video-gallery-width);
             z-index: 10003;
             background: rgba(18,18,18,.95);
@@ -636,7 +639,7 @@
             bottom: 0;
             overflow-y: auto;
             overflow-x: hidden;
-            padding: 6px 6px 96px;
+            padding: 6px 6px 10px;
             touch-action: pan-y;
             overscroll-behavior: contain;
             scrollbar-width: thin;
@@ -712,7 +715,7 @@
             position: fixed;
             left: 0;
             top: 64px;
-            bottom: 0;
+            bottom: var(--video-controls-reserved-space);
             width: var(--video-gallery-hot-zone);
             z-index: 10002;
             display: none;
@@ -816,6 +819,7 @@
             :root {
                 --video-gallery-width: 142px;
                 --video-gallery-hot-zone: 14px;
+                --video-controls-reserved-space: 96px;
             }
 
             .videoGalleryName {
@@ -1115,6 +1119,36 @@
         const videoGalleryBusy = document.getElementById('videoGalleryBusy');
         const previousVideo = document.getElementById('previousVideo');
         const nextVideo = document.getElementById('nextVideo');
+
+        // Keep the thumbnail gallery physically above the playback-control bar.
+        // Measure the real UI height instead of relying on a fixed desktop/mobile
+        // value, because the control row can be taller on narrow screens.
+        const VIDEO_GALLERY_CONTROL_GAP = 6;
+
+        function syncVideoGalleryControlClearance() {
+            if (!ui) return;
+
+            const uiHeight = Math.ceil(ui.getBoundingClientRect().height);
+            const reservedSpace = Math.max(
+                0,
+                uiHeight + VIDEO_GALLERY_CONTROL_GAP
+            );
+
+            document.documentElement.style.setProperty(
+                '--video-controls-reserved-space',
+                reservedSpace + 'px'
+            );
+        }
+
+        // Run after the initial layout and whenever the control bar changes size.
+        requestAnimationFrame(syncVideoGalleryControlClearance);
+        window.addEventListener('resize', syncVideoGalleryControlClearance);
+
+        if (typeof ResizeObserver !== 'undefined') {
+            const videoGalleryUiResizeObserver =
+                new ResizeObserver(syncVideoGalleryControlClearance);
+            videoGalleryUiResizeObserver.observe(ui);
+        }
 
         let videoElement = null;
         let hideTimer    = null;
