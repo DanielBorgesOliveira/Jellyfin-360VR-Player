@@ -9,6 +9,7 @@
     <title>360° VR Video Player</title>
     <!-- a frame vr rendering -->
     <script src="https://aframe.io/releases/1.5.0/aframe.min.js"><\/script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js"><\/script>
     <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
     <style>
         * { box-sizing: border-box; }
@@ -1335,8 +1336,58 @@
         }
 
         let videoElement = null;
+        let hlsPlayer    = null;
         let hideTimer    = null;
         let muted        = false;
+
+        const PLAYBACK_SPEED_STORAGE_KEY = 'jellyfin-vr-playback-speed-v1';
+        const REPEAT_MODE_STORAGE_KEY = 'jellyfin-vr-repeat-mode-v1';
+        const VOLUME_STORAGE_KEY = 'jellyfin-vr-volume-v1';
+        const MUTED_STORAGE_KEY = 'jellyfin-vr-muted-v1';
+        const ZOOM_STORAGE_KEY = 'jellyfin-vr-zoom-fov-v1';
+        const ROTATION_STORAGE_KEY = 'jellyfin-vr-inverted-drag-v1';
+        const MOTION_STORAGE_KEY = 'jellyfin-vr-device-motion-v1';
+        const FULLSCREEN_STORAGE_KEY = 'jellyfin-vr-fullscreen-v1';
+
+        function readParentPreference(key, fallback) {
+            try {
+                return parent.localStorage.getItem(key) ?? fallback;
+            } catch (_) {
+                return fallback;
+            }
+        }
+
+        function saveParentPreference(key, value) {
+            try {
+                parent.localStorage.setItem(key, String(value));
+            } catch (_) {}
+        }
+
+        let savedPlaybackSpeed = Number(
+            readParentPreference(PLAYBACK_SPEED_STORAGE_KEY, '1')
+        );
+        if (!Number.isFinite(savedPlaybackSpeed) || savedPlaybackSpeed <= 0) {
+            savedPlaybackSpeed = 1;
+        }
+
+        let savedRepeatMode = readParentPreference(
+            REPEAT_MODE_STORAGE_KEY,
+            'none'
+        );
+        if (!['none', 'one', 'all'].includes(savedRepeatMode)) {
+            savedRepeatMode = 'none';
+        }
+
+        let savedVolume = Number(readParentPreference(VOLUME_STORAGE_KEY, '1'));
+        if (!Number.isFinite(savedVolume)) savedVolume = 1;
+        savedVolume = Math.max(0, Math.min(1, savedVolume));
+        muted = readParentPreference(MUTED_STORAGE_KEY, 'false') === 'true';
+        volumeSlider.value = String(savedVolume);
+        muteIcon.textContent = muted
+            ? 'volume_off'
+            : (savedVolume === 0
+                ? 'volume_off'
+                : (savedVolume > 0.5 ? 'volume_up' : 'volume_down'));
 
         // Left video gallery behavior:
         // desktop = hover hot-zone + delayed collapse
@@ -1351,27 +1402,14 @@
         let currentGalleryVideoItemId = '';
 
         const AUTO_PLAY_NEXT_STORAGE_KEY = 'jellyfin-vr-autoplay-next-v1';
-        let autoPlayNextEnabled = (() => {
-            try {
-                const saved = localStorage.getItem(
-                    AUTO_PLAY_NEXT_STORAGE_KEY
-                );
-
-                // First use: Autoplay defaults to ON.
-                // After the user changes it, the saved preference wins.
-                return saved === null ? true : saved === 'true';
-            } catch (_) {
-                return true;
-            }
-        })();
+        let autoPlayNextEnabled =
+            readParentPreference(AUTO_PLAY_NEXT_STORAGE_KEY, 'true') === 'true';
 
         function saveAutoPlayNextPreference() {
-            try {
-                localStorage.setItem(
-                    AUTO_PLAY_NEXT_STORAGE_KEY,
-                    String(autoPlayNextEnabled)
-                );
-            } catch (_) {}
+            saveParentPreference(
+                AUTO_PLAY_NEXT_STORAGE_KEY,
+                autoPlayNextEnabled
+            );
         }
 
         function updateAutoPlayNextButton() {
@@ -1736,13 +1774,19 @@
         const MIN_FOV = 30;
         const MAX_FOV = 100;
         const ZOOM_STEP = 5;
-        let currentFov = DEFAULT_FOV;
+        let currentFov = Number(
+            readParentPreference(ZOOM_STORAGE_KEY, String(DEFAULT_FOV))
+        );
+        if (!Number.isFinite(currentFov)) currentFov = DEFAULT_FOV;
+        currentFov = Math.max(MIN_FOV, Math.min(MAX_FOV, currentFov));
 
-        // Start with inverted drag enabled, matching the previous working version.
-        let invertedDragEnabled = true;
+        let invertedDragEnabled =
+            readParentPreference(ROTATION_STORAGE_KEY, 'true') === 'true';
 
         // Device-motion exploration is opt-in and must be started from the button.
         let motionEnabled = false;
+        let restoreMotionOnInteraction =
+            readParentPreference(MOTION_STORAGE_KEY, 'false') === 'true';
         let motionProbeTimer = null;
         let motionProbeHandler = null;
 
@@ -2262,13 +2306,22 @@
             if (announce) showProjectionToast('Projection: ' + mode.label);
         }
 
-        function setProjectionByKey(key) {
+        function setProjectionByKey(
+            key,
+            { announce = true, persist = true } = {}
+        ) {
             const nextIndex = PROJECTION_MODES.findIndex((mode) => mode.key === key);
             if (nextIndex < 0) return;
 
             projectionModeIndex = nextIndex;
             closeProjectionMenu({ restartHideTimer: false });
-            applyProjectionMode({ announce: true });
+            applyProjectionMode({ announce });
+            if (persist) {
+                parent.postMessage({
+                    type: 'JF_VIDEO360_PROJECTION',
+                    projection: currentProjectionMode().key
+                }, '*');
+            }
             showControls();
         }
 
@@ -2549,6 +2602,8 @@
                 }
 
                 motionEnabled = true;
+                restoreMotionOnInteraction = false;
+                saveParentPreference(MOTION_STORAGE_KEY, true);
                 setAFrameMotionTracking(true);
                 updateMotionButton();
                 startMotionProbe();
@@ -2564,6 +2619,8 @@
 
         function disableMotionControl() {
             motionEnabled = false;
+            restoreMotionOnInteraction = false;
+            saveParentPreference(MOTION_STORAGE_KEY, false);
             clearMotionProbe();
             setAFrameMotionTracking(false);
             updateMotionButton();
@@ -2572,6 +2629,7 @@
 
         function setZoomFov(newFov) {
             currentFov = Math.max(MIN_FOV, Math.min(MAX_FOV, newFov));
+            saveParentPreference(ZOOM_STORAGE_KEY, currentFov);
             cameraEl.setAttribute('camera', 'fov', currentFov);
             zoomResetBtn.title = 'Reset Zoom (' + currentFov + '°)';
             showControls();
@@ -2629,7 +2687,7 @@
         }
 
         // Initialize zoom and wire the on-screen controls.
-        setZoomFov(DEFAULT_FOV);
+        setZoomFov(currentFov);
 
         zoomInBtn.onclick = () => setZoomFov(currentFov - ZOOM_STEP);
         zoomOutBtn.onclick = () => setZoomFov(currentFov + ZOOM_STEP);
@@ -2638,6 +2696,10 @@
         updateInvertDragButton();
         invertDragBtn.onclick = () => {
             invertedDragEnabled = !invertedDragEnabled;
+            saveParentPreference(
+                ROTATION_STORAGE_KEY,
+                invertedDragEnabled
+            );
             updateInvertDragButton();
             showControls();
         };
@@ -2650,6 +2712,20 @@
                 await enableMotionControl();
             }
         };
+
+        // Sensor permission may require a fresh user gesture. If motion was
+        // previously enabled, restore it on the first interaction.
+        const restoreMotionPreference = async (event) => {
+            if (!restoreMotionOnInteraction || motionEnabled) return;
+            if (event.target.closest('#motionBtn')) return;
+            restoreMotionOnInteraction = false;
+            await enableMotionControl();
+        };
+        document.addEventListener(
+            'pointerdown',
+            restoreMotionPreference,
+            { capture: true, once: true }
+        );
 
         // Unified desktop and Android controls:
         // - mouse drag rotates the view
@@ -2900,6 +2976,7 @@
             
             muted = !muted;
             videoElement.muted = muted;
+            saveParentPreference(MUTED_STORAGE_KEY, muted);
             
             // Update icon based on mute state
             muteIcon.textContent = muted ? 'volume_off' : (videoElement.volume > 0.5 ? 'volume_up' : 'volume_down');
@@ -2910,6 +2987,13 @@
             if (!videoElement) return;
             
             videoElement.volume = volumeSlider.value;
+            savedVolume = Number(volumeSlider.value);
+            saveParentPreference(VOLUME_STORAGE_KEY, savedVolume);
+            if (muted && savedVolume > 0) {
+                muted = false;
+                videoElement.muted = false;
+                saveParentPreference(MUTED_STORAGE_KEY, false);
+            }
             
             // Update volume icon based on level
             if (volumeSlider.value == 0) {
@@ -2921,16 +3005,55 @@
             }
         };
 
-        // Fullscreen toggle
-        fullscreenBtn.onclick = () => {
-            if (!document.fullscreenElement) {
-                document.documentElement.requestFullscreen().catch(() => {});
-                fsIcon.textContent = 'fullscreen_exit';
-            } else {
-                document.exitFullscreen();
-                fsIcon.textContent = 'fullscreen';
+        let restoreFullscreenOnInteraction =
+            readParentPreference(FULLSCREEN_STORAGE_KEY, 'false') === 'true';
+
+        function updateFullscreenPreference() {
+            const enabled = Boolean(document.fullscreenElement);
+            fsIcon.textContent = enabled ? 'fullscreen_exit' : 'fullscreen';
+            saveParentPreference(FULLSCREEN_STORAGE_KEY, enabled);
+            parent.postMessage({
+                type: 'JF_VIDEO360_FULLSCREEN_STATE',
+                fullscreen: enabled
+            }, '*');
+        }
+
+        // Fullscreen requires a user gesture, so a saved fullscreen state is
+        // restored on the first eligible interaction with the player.
+        fullscreenBtn.onclick = async () => {
+            try {
+                if (!document.fullscreenElement) {
+                    await document.documentElement.requestFullscreen();
+                } else {
+                    await document.exitFullscreen();
+                }
+            } catch (error) {
+                console.warn('[Jellyfin VR] Fullscreen request failed:', error);
             }
+            updateFullscreenPreference();
         };
+        document.addEventListener(
+            'fullscreenchange',
+            updateFullscreenPreference
+        );
+
+        document.addEventListener('pointerdown', (event) => {
+            if (
+                !restoreFullscreenOnInteraction ||
+                document.fullscreenElement ||
+                event.target.closest('#fullscreenBtn')
+            ) {
+                return;
+            }
+
+            restoreFullscreenOnInteraction = false;
+            document.documentElement.requestFullscreen().catch((error) => {
+                console.warn(
+                    '[Jellyfin VR] Saved fullscreen could not be restored:',
+                    error
+                );
+            });
+        }, { capture: true, once: true });
 
         // ── Settings panel logic ──
         const settingsBtn   = document.getElementById('settingsBtn');
@@ -2941,6 +3064,27 @@
         const speedLabel    = document.getElementById('speedLabel');
         const repeatLabel   = document.getElementById('repeatLabel');
         const qualityLabel  = document.getElementById('qualityLabel');
+
+        speedLabel.textContent = savedPlaybackSpeed + 'x';
+        document.querySelectorAll('[data-speed]').forEach((option) => {
+            option.classList.toggle(
+                'active',
+                Number(option.dataset.speed) === savedPlaybackSpeed
+            );
+        });
+
+        const savedRepeatOption = document.querySelector(
+            '[data-repeat="' + savedRepeatMode + '"]'
+        );
+        repeatLabel.textContent =
+            savedRepeatOption?.querySelector('.opt-label')?.textContent ||
+            'None';
+        document.querySelectorAll('[data-repeat]').forEach((option) => {
+            option.classList.toggle(
+                'active',
+                option.dataset.repeat === savedRepeatMode
+            );
+        });
 
         // Close all settings panels
         function closeAll() {
@@ -3028,6 +3172,8 @@
                 
                 const speed = parseFloat(opt.dataset.speed);
                 if (videoElement) videoElement.playbackRate = speed;
+                savedPlaybackSpeed = speed;
+                saveParentPreference(PLAYBACK_SPEED_STORAGE_KEY, speed);
                 
                 speedLabel.textContent = speed + 'x';
                 
@@ -3048,6 +3194,8 @@
                 
                 const mode = opt.dataset.repeat;
                 if (videoElement) videoElement.loop = (mode === 'one');
+                savedRepeatMode = mode;
+                saveParentPreference(REPEAT_MODE_STORAGE_KEY, mode);
                 
                 repeatLabel.textContent = opt.querySelector('.opt-label').textContent;
                 
@@ -3060,38 +3208,32 @@
             });
         });
 
-        // Quality/bitrate selection
+        let qualityChangePending = false;
+
+        // Quality/bitrate selection. Jellyfin must negotiate a new playback
+        // URL in the authenticated parent page; editing the current URL does
+        // not start a new server transcode.
         document.querySelectorAll('[data-bitrate]').forEach(opt => {
             opt.addEventListener('click', (e) => {
                 e.stopPropagation();
+
+                if (qualityChangePending || !videoElement) return;
                 
                 const bitrate = parseInt(opt.dataset.bitrate);
                 const label = opt.querySelector('.opt-label').textContent;
-                
-                qualityLabel.textContent = label;
-                
-                // Mark active
-                document.querySelectorAll('[data-bitrate]').forEach(o => o.classList.remove('active'));
-                opt.classList.add('active');
-                
-                // Change video source with new bitrate parameter
-                if (videoElement && videoElement.src) {
-                    const currentTime = videoElement.currentTime;
-                    const url = new URL(videoElement.src);
-                    
-                    if (bitrate === 0) {
-                        url.searchParams.delete('maxStreamingBitrate');
-                    } else {
-                        url.searchParams.set('maxStreamingBitrate', bitrate);
-                    }
-                    
-                    videoElement.src = url.toString();
-                    videoElement.currentTime = currentTime;
-                    videoElement.play().catch(() => {});
-                }
-                
+
+                qualityChangePending = true;
+                showProjectionToast('Changing quality to ' + label + 'â€¦', 3000);
+
+                parent.postMessage({
+                    type: 'JF_VIDEO360_QUALITY',
+                    bitrate,
+                    label,
+                    currentTime: videoElement.currentTime || 0,
+                    paused: videoElement.paused
+                }, '*');
+
                 closeAll();
-                settingsPanel.classList.add('open');
             });
         });
 
@@ -3215,21 +3357,32 @@
                 return;
             }
 
+            if (data.type === 'JF_VIDEO360_QUALITY_ERROR') {
+                qualityChangePending = false;
+                showProjectionToast(
+                    data.message || 'Unable to change video quality',
+                    3000
+                );
+                return;
+            }
+
             const {
                 type,
                 src,
                 currentTime,
-                itemId
+                itemId,
+                autoplay,
+                qualityBitrate,
+                qualityLabel: loadedQualityLabel,
+                projection: loadedProjection
             } = data;
 
             if (type !== 'LOAD_VIDEO' || !src) return;
 
-            // A newly selected video always starts in Normal projection.
-            useNormalProjection();
             closeProjectionMenu({ restartHideTimer: false });
 
             const previousRate =
-                videoElement?.playbackRate || 1;
+                videoElement?.playbackRate || savedPlaybackSpeed;
 
             seekBar.style.width = '0%';
             timeDisplay.textContent = '0:00 / 0:00';
@@ -3271,11 +3424,24 @@
                 try { videoElement.pause(); } catch (_) {}
             }
 
-            videoElement.volume = parseFloat(volumeSlider.value);
+            videoElement.volume = savedVolume;
+            videoElement.muted = muted;
             videoElement.playbackRate = previousRate;
+            videoElement.loop = savedRepeatMode === 'one';
 
             if (itemId) {
                 setActiveGalleryVideo(itemId);
+            }
+
+            if (qualityBitrate !== undefined) {
+                qualityChangePending = false;
+                qualityLabel.textContent = loadedQualityLabel || 'Auto';
+                document.querySelectorAll('[data-bitrate]').forEach((option) => {
+                    option.classList.toggle(
+                        'active',
+                        Number(option.dataset.bitrate) === Number(qualityBitrate)
+                    );
+                });
             }
 
             videoElement.onloadedmetadata = () => {
@@ -3301,21 +3467,32 @@
                     console.debug('[Jellyfin VR] Texture refresh note:', error);
                 }
 
-                playIcon.textContent = 'pause';
                 updateEndsAt();
                 updateProgress();
                 showControls();
                 videoGalleryBusy.style.display = 'none';
 
-                videoElement.play().catch((error) => {
-                    console.warn(
-                        '[Jellyfin VR] Selected video could not autoplay:',
-                        error
-                    );
-                });
+                if (autoplay === false) {
+                    videoElement.pause();
+                    playIcon.textContent = 'play_arrow';
+                } else {
+                    playIcon.textContent = 'pause';
+                    videoElement.play().catch((error) => {
+                        console.warn(
+                            '[Jellyfin VR] Selected video could not autoplay:',
+                            error
+                        );
+                    });
+                }
             };
 
             videoElement.onloadeddata = () => {
+                // Reapply the saved projection once a decodable frame exists.
+                setProjectionByKey(
+                    loadedProjection || currentProjectionMode().key,
+                    { announce: false, persist: false }
+                );
+
                 // Some Chromium/A-Frame combinations keep the last decoded frame
                 // until the first frame of the new source is available.
                 try {
@@ -3337,9 +3514,39 @@
                 );
             };
 
-            // Change only the source on the persistent element.
-            videoElement.src = src;
-            videoElement.load();
+            // Change only the source on the persistent element. Jellyfin's
+            // transcoding URL is HLS; use native HLS where available and
+            // hls.js everywhere else without replacing the video element.
+            if (hlsPlayer) {
+                hlsPlayer.destroy();
+                hlsPlayer = null;
+            }
+
+            const isHls = /(?:\.m3u8)(?:[?#]|$)/i.test(src);
+            const nativeHls = videoElement.canPlayType(
+                'application/vnd.apple.mpegurl'
+            );
+
+            if (isHls && !nativeHls && window.Hls?.isSupported()) {
+                hlsPlayer = new window.Hls({
+                    enableWorker: true,
+                    backBufferLength: 30
+                });
+                hlsPlayer.on(window.Hls.Events.ERROR, (_event, data) => {
+                    if (!data?.fatal) return;
+                    console.error('[Jellyfin VR] Fatal HLS error:', data);
+                    qualityChangePending = false;
+                    showProjectionToast(
+                        'Unable to play the transcoded stream',
+                        3000
+                    );
+                });
+                hlsPlayer.loadSource(src);
+                hlsPlayer.attachMedia(videoElement);
+            } else {
+                videoElement.src = src;
+                videoElement.load();
+            }
         });
 
         // Remove A-Frame's default VR button (we don't want it)
@@ -3363,6 +3570,44 @@
 
   const VR360_TAG = 'VR360';
   const AUTO_VR_STORAGE_KEY = 'jellyfin-vr-auto360-enabled-v1';
+  const QUALITY_STORAGE_KEY = 'jellyfin-vr-quality-v1';
+  const PROJECTION_STORAGE_KEY = 'jellyfin-vr-projection-v1';
+  const VALID_PROJECTIONS = new Set(['normal', 'mirror', 'planet']);
+
+  function loadSavedProjection() {
+    try {
+      const saved = localStorage.getItem(PROJECTION_STORAGE_KEY) || 'normal';
+      return VALID_PROJECTIONS.has(saved) ? saved : 'normal';
+    } catch (_) {
+      return 'normal';
+    }
+  }
+
+  function saveProjection(projection) {
+    if (!VALID_PROJECTIONS.has(projection)) return;
+    try {
+      localStorage.setItem(PROJECTION_STORAGE_KEY, projection);
+    } catch (_) {}
+  }
+
+  function loadSavedQuality() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(QUALITY_STORAGE_KEY) || 'null');
+      const bitrate = Number(saved?.bitrate) || 0;
+      return {
+        bitrate,
+        label: String(saved?.label || (bitrate ? bitrate + ' bps' : 'Auto'))
+      };
+    } catch (_) {
+      return { bitrate: 0, label: 'Auto' };
+    }
+  }
+
+  function saveQuality(quality) {
+    try {
+      localStorage.setItem(QUALITY_STORAGE_KEY, JSON.stringify(quality));
+    } catch (_) {}
+  }
 
   // Auto VR is ON by default. The preference is stored per browser/device.
   let autoVREnabled = (() => {
@@ -3661,6 +3906,38 @@
         response.status +
         '): ' +
         pathname
+      );
+    }
+
+    return await response.json();
+  }
+
+  async function jellyfinPostJson(pathname, body, params = {}) {
+    const {
+      token,
+      serverBase
+    } = getJellyfinConnectionContext();
+
+    const url = new URL(serverBase + pathname);
+
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null || value === '') continue;
+      url.searchParams.set(key, String(value));
+    }
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['X-Emby-Token'] = token;
+
+    const response = await fetch(url.toString(), {
+      method: 'POST',
+      headers,
+      credentials: 'same-origin',
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        'Jellyfin request failed (' + response.status + '): ' + pathname
       );
     }
 
@@ -4178,6 +4455,88 @@
     };
   }
 
+  async function getQualityPlaybackUrl(itemId, maxBitrate) {
+    const bitrate = Number(maxBitrate) || 0;
+
+    // Auto returns to Jellyfin's normal direct-play/remux decision.
+    if (bitrate === 0) {
+      return await getGalleryPlaybackUrl(itemId);
+    }
+
+    const { userId, token, serverBase } = getJellyfinConnectionContext();
+    const playbackInfo = await jellyfinPostJson(
+      '/Items/' + encodeURIComponent(itemId) + '/PlaybackInfo',
+      {
+        UserId: userId,
+        // Load the full timeline and let the persistent video element seek
+        // after metadata is available. Starting the transcode at the saved
+        // position as well would apply the offset twice.
+        StartTimeTicks: 0,
+        IsPlayback: true,
+        AutoOpenLiveStream: true,
+        MaxStreamingBitrate: bitrate,
+        DeviceProfile: {
+          Name: 'Jellyfin VR Player',
+          SupportedMediaTypes: 'Video',
+          MaxStreamingBitrate: bitrate,
+          MaxStaticBitrate: bitrate,
+          DirectPlayProfiles: [],
+          TranscodingProfiles: [{
+            Container: 'ts',
+            Type: 'Video',
+            VideoCodec: 'h264',
+            AudioCodec: 'aac,mp3',
+            Protocol: 'hls',
+            Context: 'Streaming',
+            EstimateContentLength: false,
+            EnableMpegtsM2TsMode: false,
+            TranscodeSeekInfo: 'Auto',
+            CopyTimestamps: false,
+            EnableSubtitlesInManifest: false,
+            MaxAudioChannels: '2',
+            MinSegments: 1,
+            SegmentLength: 0,
+            BreakOnNonKeyFrames: true
+          }],
+          ContainerProfiles: [],
+          CodecProfiles: [],
+          SubtitleProfiles: [],
+          ResponseProfiles: []
+        }
+      },
+      { userId }
+    );
+
+    const source = (playbackInfo?.MediaSources || playbackInfo?.mediaSources || [])[0];
+    const transcodingUrl = source?.TranscodingUrl || source?.transcodingUrl;
+
+    if (!transcodingUrl) {
+      const supportsTranscoding =
+        source?.SupportsTranscoding ?? source?.supportsTranscoding;
+      const reason =
+        source?.TranscodingSubProtocol ||
+        source?.transcodingSubProtocol ||
+        source?.DirectStreamUrl ||
+        source?.directStreamUrl ||
+        'no compatible transcoding profile';
+      throw new Error(
+        'Jellyfin did not provide a transcoding URL (' +
+        'supports transcoding: ' + String(supportsTranscoding) +
+        '; ' + String(reason) + ').'
+      );
+    }
+
+    const url = new URL(transcodingUrl, serverBase + '/');
+    if (token && !url.searchParams.has('api_key')) {
+      url.searchParams.set('api_key', token);
+    }
+
+    return {
+      src: url.toString(),
+      item: await getCachedVideoMetadata(itemId)
+    };
+  }
+
   function itemHasVR360Tag(item) {
     const tags = item?.Tags || item?.tags || [];
     if (!Array.isArray(tags)) return false;
@@ -4232,6 +4591,8 @@
 
     const initialItemId = options.itemId || getCurrentJellyfinItemId();
     let activeItemId = initialItemId;
+    let selectedQuality = loadSavedQuality();
+    let selectedProjection = loadSavedProjection();
 
     // Pause Jellyfin's native player.
     const jellyfinVideo = getNativeJellyfinVideo();
@@ -4444,6 +4805,7 @@
     // Send initial video and gallery data once the iframe is ready.
     iframe.onload = async () => {
       let currentTitle = '';
+      let initialSrc = videoInfo.src;
 
       if (activeItemId) {
         try {
@@ -4454,28 +4816,108 @@
             metadata?.name ||
             '';
         } catch (_) {}
+
+        if (selectedQuality.bitrate > 0) {
+          try {
+            initialSrc = (
+              await getQualityPlaybackUrl(
+                activeItemId,
+                selectedQuality.bitrate
+              )
+            ).src;
+          } catch (error) {
+            console.warn(
+              '[Jellyfin VR] Saved quality is unavailable; using Auto.',
+              error
+            );
+            selectedQuality = { bitrate: 0, label: 'Auto' };
+            saveQuality(selectedQuality);
+          }
+        }
       }
 
       iframe.contentWindow.postMessage({
         type: 'LOAD_VIDEO',
-        src: videoInfo.src,
+        src: initialSrc,
         currentTime: videoInfo.currentTime,
         itemId: activeItemId,
-        title: currentTitle
+        title: currentTitle,
+        qualityBitrate: selectedQuality.bitrate,
+        qualityLabel: selectedQuality.label,
+        projection: selectedProjection
       }, '*');
 
       sendVideoGalleryToViewer();
     };
 
     let gallerySwitchBusy = false;
+    let qualitySwitchBusy = false;
 
     onViewerMessage = async (event) => {
-      if (
-        event.source !== iframe.contentWindow ||
-        event.data?.type !== 'JF_VIDEO360_GOTO'
-      ) {
+      if (event.source !== iframe.contentWindow) return;
+
+      if (event.data?.type === 'JF_VIDEO360_FULLSCREEN_STATE') {
+        closeBtn.style.display = event.data?.fullscreen ? 'none' : 'flex';
         return;
       }
+
+      if (event.data?.type === 'JF_VIDEO360_PROJECTION') {
+        const projection = String(event.data?.projection || '');
+        if (VALID_PROJECTIONS.has(projection)) {
+          selectedProjection = projection;
+          saveProjection(selectedProjection);
+        }
+        return;
+      }
+
+      if (event.data?.type === 'JF_VIDEO360_QUALITY') {
+        if (qualitySwitchBusy || !activeItemId) return;
+
+        qualitySwitchBusy = true;
+
+        try {
+          const bitrate = Number(event.data?.bitrate) || 0;
+          const currentTime = Number(event.data?.currentTime) || 0;
+          const result = await getQualityPlaybackUrl(
+            activeItemId,
+            bitrate
+          );
+          selectedQuality = {
+            bitrate,
+            label: event.data?.label || 'Auto'
+          };
+          saveQuality(selectedQuality);
+
+          iframe.contentWindow.postMessage(
+            {
+              type: 'LOAD_VIDEO',
+              src: result.src,
+              currentTime,
+              itemId: activeItemId,
+              autoplay: !event.data?.paused,
+              qualityBitrate: bitrate,
+              qualityLabel: selectedQuality.label,
+              projection: selectedProjection
+            },
+            '*'
+          );
+        } catch (error) {
+          console.error('[Jellyfin VR] Unable to change quality:', error);
+          iframe.contentWindow.postMessage(
+            {
+              type: 'JF_VIDEO360_QUALITY_ERROR',
+              message: error?.message || 'Unable to change video quality'
+            },
+            '*'
+          );
+        } finally {
+          qualitySwitchBusy = false;
+        }
+
+        return;
+      }
+
+      if (event.data?.type !== 'JF_VIDEO360_GOTO') return;
 
       const targetItemId =
         normalizeJellyfinItemId(event.data?.itemId);
@@ -4500,8 +4942,23 @@
       );
 
       try {
-        const result =
-          await getGalleryPlaybackUrl(targetItemId);
+        let result;
+
+        try {
+          result = selectedQuality.bitrate > 0
+            ? await getQualityPlaybackUrl(targetItemId, selectedQuality.bitrate)
+            : await getGalleryPlaybackUrl(targetItemId);
+        } catch (qualityError) {
+          if (selectedQuality.bitrate === 0) throw qualityError;
+
+          console.warn(
+            '[Jellyfin VR] Selected quality is unavailable for the next video; using Auto.',
+            qualityError
+          );
+          selectedQuality = { bitrate: 0, label: 'Auto' };
+          saveQuality(selectedQuality);
+          result = await getGalleryPlaybackUrl(targetItemId);
+        }
 
         activeItemId = targetItemId;
         overlay.dataset.itemId = activeItemId;
@@ -4512,6 +4969,9 @@
             src: result.src,
             currentTime: 0,
             itemId: activeItemId,
+            qualityBitrate: selectedQuality.bitrate,
+            qualityLabel: selectedQuality.label,
+            projection: selectedProjection,
             title:
               result.item?.Name ||
               result.item?.name ||
