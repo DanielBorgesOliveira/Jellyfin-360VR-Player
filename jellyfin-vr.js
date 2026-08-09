@@ -259,6 +259,10 @@
             display: flex; 
         }
 
+        .volume-popup.dismissed {
+            display: none !important;
+        }
+
         /* The actual slider input */
         .volume-slider-vert {
             writing-mode: vertical-lr;
@@ -1264,6 +1268,8 @@
         const skipFwdBtn    = document.getElementById('skipFwdBtn');
         const muteBtn       = document.getElementById('muteBtn');
         const muteIcon      = muteBtn.querySelector('.material-icons');
+        const volumeWrap    = document.getElementById('volumeWrap');
+        const volumePopup   = document.getElementById('volumePopup');
         const seekContainer = document.getElementById('seekContainer');
         const seekBar       = document.getElementById('seekBar');
         const timeDisplay   = document.getElementById('timeDisplay');
@@ -2690,6 +2696,9 @@
             canvas.addEventListener('pointerdown', (e) => {
                 if (e.pointerType !== 'mouse' || e.button !== 0) return;
 
+                // Canvas gestures prevent a normal click from reaching the
+                // document, so close settings as soon as the screen is used.
+                closeAll();
                 mouseDragging = true;
                 previousMouseX = e.clientX;
                 previousMouseY = e.clientY;
@@ -2747,6 +2756,9 @@
             }
 
             canvas.addEventListener('touchstart', (e) => {
+                // preventDefault below suppresses the synthetic click on touch
+                // devices; dismiss settings explicitly instead.
+                closeAll();
                 if (e.touches.length >= 2) {
                     beginTouchPinch(e.touches);
                 } else if (e.touches.length === 1) {
@@ -2937,6 +2949,25 @@
             repeatPanel.classList.remove('open');
             qualityPanel.classList.remove('open');
         }
+
+        // Dismiss open control menus before an outside interaction. Capture
+        // phase also covers the VR canvas and controls that stop propagation.
+        document.addEventListener('pointerdown', (e) => {
+            const target = e.target;
+
+            if (!target.closest('#settingsBtn, .settings-panel, .settings-sub')) {
+                closeAll();
+            }
+            if (!projectionWrap.contains(target)) {
+                closeProjectionMenu({ restartHideTimer: false });
+            }
+            volumePopup.classList.toggle('dismissed', !volumeWrap.contains(target));
+        }, true);
+
+        // Allow hover to reveal volume again after it was dismissed.
+        volumeWrap.addEventListener('pointerenter', () => {
+            volumePopup.classList.remove('dismissed');
+        });
 
         // Settings button click handler
         settingsBtn.onclick = (e) => {
